@@ -1,14 +1,59 @@
 import os
 import plistlib
 import tkinter as tk
+import _tkinter
 from tkinter import ttk, filedialog
 import psutil
 import subprocess
 import concurrent.futures
 from tqdm import tqdm
+from itertools import repeat
+import time
 
 ALLOWED_APPS_FILE = "allowed_apps.txt"
 BACKGROUND_APPS_FILE = "background_apps.txt"
+BASIC_BACKGROUND_PROCESSES = {
+    "UserEventAgent",
+    "cfprefsd",
+    "loginwindow",
+    "nsurlsessiond",
+    "nsurlstoraged",
+    "syspolicyd",
+    "distnoted",
+    "sharingd",
+    "secd",
+    "iconservicesagent",
+    "dock",
+    "systemuiserver",
+    "syslogd",
+    "mds",
+    "mds_stores",
+    "mdworker",
+    "mdworker_shared",
+    "Keychain Circle Notification",
+    "CoreServicesUIAgent",
+    "AdobeIPCBroker",
+    "SiriNCService",
+    "universalAccessAuthWarn",
+    "WiFiAgent",
+    "ControlCenter",
+    "EmojiFunctionRowIM_Extension",
+    "QuickLookUIService",
+    "QLPreviewGenerationExtension",
+    "Siri",
+    "com.apple.dock.external.extra.arm64",
+    "com.apple.dock.extra",
+    "TextInputMenuAgent",
+    "AirPlayUIAgent",
+    "WindowManager",
+    "ControlStrip",
+    "NotificationCenter",
+    "TextInputSwitcher",
+    "DockHelper",
+}
+
+# Make sure all names are in lowercase for process to be recognized
+BASIC_BACKGROUND_PROCESSES = {process_name.lower() for process_name in BASIC_BACKGROUND_PROCESSES}
 
 def load_allowed_apps():
     if not os.path.exists(ALLOWED_APPS_FILE):
@@ -19,7 +64,7 @@ def load_allowed_apps():
 
 def save_allowed_apps(apps):
     with open(ALLOWED_APPS_FILE, "w") as f:
-        for app in apps:
+        for iapp in apps:
             f.write(app + "\n")
 
 def load_background_apps():
@@ -68,17 +113,35 @@ def terminate_apps(allowed_apps):
             except:
                 pass
 
-def terminate_app(process_name):
+def terminate_app(process_name, current_task, total_processes):
     try:
         cmd = f'osascript -e \'quit app "{process_name}"\' >/dev/null 2>&1'
-        subprocess.call(cmd, shell=True, timeout=5)
-        return f"Terminated: {process_name}"
+        subprocess.call(cmd, shell=True, timeout=15)
+        return process_name, f"Terminated: {process_name}"
     except subprocess.TimeoutExpired:
-        return f"Timeout: {process_name}"
+        return process_name, f"Timeout: {process_name}"
     except:
-        return f"Failed to terminate: {process_name}"
+        return process_name, f"Failed to terminate: {process_name}"
+
+def is_menu_bar_app(process_name):
+    cmd = f"mdls -name kMDItemIsMenuBarApp '/Applications/{process_name}'"
+    try:
+        result = subprocess.check_output(cmd, shell=True).decode("utf-8").strip()
+        return "1" in result
+    except subprocess.CalledProcessError:
+        return False
+
+def is_helper_of_allowed_app(process_name, allowed_apps):
+    process_name_lower = process_name.lower()
+    for allowed_app in allowed_apps:
+        allowed_app_basename = os.path.splitext(os.path.basename(allowed_app))[0].lower()
+        if allowed_app_basename in process_name_lower and "helper" in process_name_lower:
+            return True
+    return False
     
 class App(tk.Tk):
+    allowed_apps = load_allowed_apps()
+    
     def __init__(self):
         super().__init__()
 
@@ -130,6 +193,7 @@ class App(tk.Tk):
         )
         terminate_button.pack(pady=5)
 
+        self.done = False
         self.auto_close_var = tk.BooleanVar()
         self.auto_close_check = tk.Checkbutton(
             self, text="Auto-close", variable=self.auto_close_var
@@ -184,50 +248,98 @@ class App(tk.Tk):
 
         save_func(app_set)
 
-
     def terminate_apps_button(self):
+        print(f"Auto-close value: {self.auto_close_var.get()}")
         self.after(10, self.terminate_apps_in_gui)
 
-        if self.auto_close_var.get():
+        if self.auto_close_var.get() and self.done:
             self.after(1000, self.destroy)
-
+    
     def terminate_apps_in_gui(self):
-        script_process_name = os.path.splitext(os.path.basename(__file__))[0]
-        allowed_apps_basenames = {os.path.splitext(os.path.basename(app))[0] for app in self.allowed_apps}
-        allowed_apps_basenames.add(script_process_name)
+        # Always top when terminating
+        self.attributes("-topmost", True)
+        
+        script_process_name = os.path.splitext(os.path.basename(__file__))[0].lower()
+        python_process_name = "python"
+        allowed_apps_basenames = {os.path.splitext(os.path.basename(app))[0].lower() for app in self.allowed_apps}
+        allowed_apps_basenames.update({script_process_name, python_process_name})
+
+        background_apps_basenames = {os.path.splitext(os.path.basename(app))[0].lower() for app in self.background_apps}
 
         helper_apps = set()
-        for app in self.allowed_apps:
-            app_path = os.path.join("/Applications", app)
-            helper_apps.update(get_helper_apps(app_path))
+        for app in self.background_apps:
+            if os.path.splitext(os.path.basename(app))[0].lower() not in allowed_apps_basenames:  # Add this line
+                app_path = os.path.join("/Applications", app)
+                helper_apps.update(get_helper_apps(app_path))
 
         running_processes = [
-            proc for proc in psutil.process_iter(["name", "pid"]) if proc.info["pid"] > 0
+            proc for proc in psutil.process_iter(["name", "pid"]) if proc.info["pid"] > 0 and proc.info["name"].lower() not in background_apps_basenames
         ]
+
         total_processes = len(running_processes)
         self.progress_var.set(0)
         self.progressbar["maximum"] = total_processes
 
+        completed_tasks = 0
+
         with concurrent.futures.ThreadPoolExecutor() as executor:
-            future_to_process = {executor.submit(terminate_app, process.info["name"]): process for process in running_processes if (process.info["name"] not in allowed_apps_basenames and process.info["name"] not in helper_apps)}
+            current_task = 1
+            futures = {
+                executor.submit(
+                    terminate_app,
+                    process.info["name"],
+                    current_task,
+                    total_processes,
+                ): process
+                for process in running_processes
+                if (
+                    process.info["name"].lower()
+                    not in allowed_apps_basenames
+                    and process.info["name"] not in helper_apps
+                    and process.info["name"].lower()
+                    not in background_apps_basenames
+                    and process.info["name"].lower()
+                    not in BASIC_BACKGROUND_PROCESSES
+                    and (
+                        not is_menu_bar_app(process.info["name"])
+                        or (
+                            is_menu_bar_app(process.info["name"])
+                            and process.info["name"].lower()
+                            in background_apps_basenames
+                        )
+                    )
+                )
+            }
+            try:
+                for future in concurrent.futures.as_completed(futures):
+                    process = futures[future]
+                    process_name, status_msg = future.result()
+                    progress = int((current_task / total_processes) * 100)
+                    status_msg = f"{status_msg} ({progress}%)"
+                    
+                    self.status_text.set(status_msg)
+                    self.status_box.configure(state="normal")
+                    self.status_box.insert(tk.END, status_msg + "\n")
+                    self.status_box.configure(state="disabled")
+                    self.status_box.see(tk.END)
 
-            for i, future in enumerate(concurrent.futures.as_completed(future_to_process)):
-                process = future_to_process[future]
-                try:
-                    status_msg = future.result()
-                except Exception as exc:
-                    status_msg = f"Failed to terminate {process.info['name']}: {exc}"
+                    self.progress_var.set(current_task)  # Update the progress bar value
+                    self.progress_label_var.set(f"Progress: {progress}%")
+                    self.update_idletasks()
 
-                self.status_text.set(status_msg)
-                self.status_box.configure(state="normal")
-                self.status_box.insert(tk.END, status_msg + "\n")
-                self.status_box.configure(state="disabled")
-                self.status_box.see(tk.END)
+                current_task += 1
 
-                self.progress_var.set(i + 1)
-                self.update_idletasks()
-        self.progress_label_var.set("Done!")
-    
+                self.progress_label_var.set("Done!")
+                self.attributes("-topmost", False)
+                self.done = True
+                
+            except _tkinter.TclError:
+                pass
+            
+        if self.done and self.auto_close_var.get():
+            print("Done:", self.done)
+            raise SystemExit
+
     def create_tree_view(self, parent, heading, app_set):
         tree_frame = tk.Frame(parent)
         tree_frame.pack(expand=True, fill=tk.BOTH)
@@ -252,8 +364,6 @@ class App(tk.Tk):
 
     def create_background_apps_section(self, parent):
         self.background_apps_tree = self.create_tree_view(parent, "Background Apps", self.background_apps)
-
-    # Add remaining methods to manage background apps and their UI here.
 
 # Initialize and run the app
 if __name__ == "__main__":
