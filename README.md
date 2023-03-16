@@ -21,7 +21,7 @@ App Terminator is a simple Python script that allows you to manage and terminate
 1. Clone the repository:
 ```
 git clone https://github.com/TLE47/App_Terminator
-cd app-terminator
+cd App_Terminator
 ```
 
 2. (Optional) Create and activate a virtual environment:
