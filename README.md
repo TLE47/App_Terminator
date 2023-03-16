@@ -1,8 +1,7 @@
 # App Terminator
 App Terminator is a simple Python script that allows you to manage and terminate macOS applications that are not in your allowed list. It uses a simple Tkinter-based GUI and is designed to be user-friendly and efficient.
 
-<img width="251" alt="image" src="https://user-images.githubusercontent.com/91586153/225480549-7c620004-21cd-436f-b78e-d34fd72703a3.png">
-
+<img width="498" alt="image" src="https://user-images.githubusercontent.com/91586153/225491208-351f5ecf-94fd-4428-91a9-9d531b039900.png">
 
 ## Features
 - Add and delete allowed applications
